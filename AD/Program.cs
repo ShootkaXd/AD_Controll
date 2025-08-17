@@ -58,7 +58,7 @@ namespace AD
 
         public MainForm()
         {
-            Text = "AD Manager — пользователи и компьютеры (иерархический выбор OU)";
+            Text = "AD Manager — пользователи и компьютеры";
             Width = 1100;
             Height = 750;
             StartPosition = FormStartPosition.CenterScreen;
