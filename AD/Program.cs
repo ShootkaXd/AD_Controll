@@ -1045,7 +1045,7 @@ namespace AD
             {
                 var n = de.Properties["name"]?.Value?.ToString();
                 return string.Equals("name=" + n, expected, StringComparison.OrdinalIgnoreCase) ||
-                       string.Equals(n, expected.split('=')[1], StringComparison.OrdinalIgnoreCase);
+                       string.Equals(n, expected.Split('=')[1], StringComparison.OrdinalIgnoreCase);
             }
             catch { return false; }
         }
