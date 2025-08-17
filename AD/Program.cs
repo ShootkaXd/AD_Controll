@@ -7,6 +7,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Windows.Forms;
+using System.Drawing;
 
 namespace AD
 {
@@ -28,7 +29,7 @@ namespace AD
 
         // Вкладка Пользователь
         private TreeView tvUsers;           // Иерархический выбор OU (пользователи)
-        private Label lblUsersDn;           // Показ DN выбранного контейнера
+        private Label lblUsersDn;           // Показ DN выбранного контейнера/объекта
         private Button btnRefreshUsersTree;
         private TextBox txtGivenName;
         private TextBox txtSurname;
@@ -37,15 +38,20 @@ namespace AD
         private TextBox txtUpnSuffix;
         private TextBox txtPassword;
         private Button btnGenPassword;      // Сгенерировать пароль
+        private Button btnCopyPassword;     // Копировать пароль
+        private CheckBox chkShowPassword;   // Показать/скрыть пароль
         private CheckBox chkMustChange;
         private Button btnCreateUser;
 
         // Вкладка Компьютер
         private TreeView tvComputers;       // Иерархический выбор OU (компьютеры)
-        private Label lblComputersDn;       // Показ DN выбранного контейнера
+        private Label lblComputersDn;       // Показ DN выбранного контейнера/объекта
         private Button btnRefreshComputersTree;
         private TextBox txtCompName;
         private Button btnCreateComputer;
+
+        // Иконки
+        private ImageList _icons;
 
         // Лог
         private TextBox txtLog;
@@ -126,8 +132,10 @@ namespace AD
             };
             tvUsers.AfterSelect += (s, e) =>
             {
-                if (e.Node?.Tag is OuNodeTag tag)
-                    lblUsersDn.Text = "Выбрано: " + tag.DistinguishedName;
+                if (e.Node?.Tag is OuNodeTag tagOu)
+                    lblUsersDn.Text = "Выбрано: " + tagOu.DistinguishedName;
+                else if (e.Node?.Tag is AccountNodeTag tagAcc)
+                    lblUsersDn.Text = $"Выбрано: {tagAcc.Kind}: {tagAcc.DistinguishedName}";
                 else
                     lblUsersDn.Text = "Выбрано: —";
             };
@@ -171,19 +179,49 @@ namespace AD
             txtUpnSuffix = new TextBox { Anchor = AnchorStyles.Left | AnchorStyles.Right, PlaceholderText = "например, contoso.com" };
             pnlUserForm.Controls.Add(txtUpnSuffix, 1, 3);
 
-            // Пароль + кнопка "Сгенерировать"
+            // Пароль + кнопки "Сгенерировать", "Копировать", + чекбокс "Показать"
             pnlUserForm.Controls.Add(new Label { Text = "Начальный пароль:", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 4);
             var pnlPwd = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
             txtPassword = new TextBox { Width = 220, UseSystemPasswordChar = true };
             btnGenPassword = new Button { Text = "Сгенерировать", AutoSize = true };
+            btnCopyPassword = new Button { Text = "Копировать", AutoSize = true };
+            chkShowPassword = new CheckBox { Text = "Показать пароль", AutoSize = true };
+
             btnGenPassword.Click += (s, e) =>
             {
                 var pwd = GenerateSecurePassword(16);
                 txtPassword.Text = pwd;
                 LogOk("Сгенерирован безопасный пароль (16 знаков).");
             };
+
+            btnCopyPassword.Click += (s, e) =>
+            {
+                try
+                {
+                    var p = txtPassword.Text ?? string.Empty;
+                    if (string.IsNullOrEmpty(p))
+                    {
+                        LogErr("Пароль пуст — нечего копировать.");
+                        return;
+                    }
+                    Clipboard.SetText(p);
+                    LogOk("Пароль скопирован в буфер обмена.");
+                }
+                catch (Exception ex)
+                {
+                    LogErr("Не удалось скопировать пароль: " + ex.Message);
+                }
+            };
+
+            chkShowPassword.CheckedChanged += (s, e) =>
+            {
+                txtPassword.UseSystemPasswordChar = !chkShowPassword.Checked;
+            };
+
             pnlPwd.Controls.Add(txtPassword);
             pnlPwd.Controls.Add(btnGenPassword);
+            pnlPwd.Controls.Add(btnCopyPassword);
+            pnlPwd.Controls.Add(chkShowPassword);
             pnlUserForm.Controls.Add(pnlPwd, 1, 4);
 
             chkMustChange = new CheckBox { Text = "Сменить пароль при первом входе", AutoSize = true };
@@ -231,8 +269,10 @@ namespace AD
             };
             tvComputers.AfterSelect += (s, e) =>
             {
-                if (e.Node?.Tag is OuNodeTag tag)
-                    lblComputersDn.Text = "Выбрано: " + tag.DistinguishedName;
+                if (e.Node?.Tag is OuNodeTag tagOu)
+                    lblComputersDn.Text = "Выбрано: " + tagOu.DistinguishedName;
+                else if (e.Node?.Tag is AccountNodeTag tagAcc)
+                    lblComputersDn.Text = $"Выбрано: {tagAcc.Kind}: {tagAcc.DistinguishedName}";
                 else
                     lblComputersDn.Text = "Выбрано: —";
             };
@@ -271,12 +311,29 @@ namespace AD
             // Значения по умолчанию
             txtUpnSuffix.Text = GetDefaultUpnSuffix();
 
+            // Иконки и привязка к деревьям
+            InitTreeIcons();
+            tvUsers.ImageList = _icons;
+            tvComputers.ImageList = _icons;
+
             // При первом показе — построить деревья OU
             Shown += (s, e) =>
             {
                 BuildOuTree(tvUsers, lblUsersDn, includeUsersCn: true, includeComputersCn: false);
                 BuildOuTree(tvComputers, lblComputersDn, includeUsersCn: false, includeComputersCn: true);
             };
+        }
+
+        private void InitTreeIcons()
+        {
+            _icons = new ImageList { ColorDepth = ColorDepth.Depth32Bit, ImageSize = new Size(16, 16) };
+            // Заглушки: при желании замените на свои ресурсы
+            _icons.Images.Add("domain", SystemIcons.Shield.ToBitmap());
+            _icons.Images.Add("ou", SystemIcons.Application.ToBitmap());
+            _icons.Images.Add("container", SystemIcons.Asterisk.ToBitmap());
+            _icons.Images.Add("user", SystemIcons.Information.ToBitmap());
+            _icons.Images.Add("computer", SystemIcons.WinLogo.ToBitmap());
+            _icons.Images.Add("default", SystemIcons.Application.ToBitmap());
         }
 
         private string GetDefaultUpnSuffix()
@@ -401,7 +458,7 @@ namespace AD
             catch (Exception ex) { LogErr(ex.Message); }
         }
 
-        // ===== Построение дерева OU =====
+        // ===== Построение дерева OU + аккаунты =====
         private void BuildOuTree(TreeView tv, Label lblSelected, bool includeUsersCn, bool includeComputersCn)
         {
             try
@@ -420,7 +477,9 @@ namespace AD
                 // Корень домена как корневой узел дерева
                 var rootNode = new TreeNode(defaultNc)
                 {
-                    Tag = new OuNodeTag { Name = defaultNc, DistinguishedName = defaultNc, Kind = NodeKind.DomainRoot }
+                    Tag = new OuNodeTag { Name = defaultNc, DistinguishedName = defaultNc, Kind = NodeKind.DomainRoot },
+                    ImageKey = "domain",
+                    SelectedImageKey = "domain"
                 };
                 tv.Nodes.Add(rootNode);
 
@@ -428,8 +487,14 @@ namespace AD
                 using (var rootDe = new DirectoryEntry(BuildLdapPath(domainFqdn, defaultNc)))
                 {
                     // Спец-контейнеры
-                    if (includeUsersCn) TryAddContainerNode(rootDe, rootNode, "CN=Users");
-                    if (includeComputersCn) TryAddContainerNode(rootDe, rootNode, "CN=Computers");
+                    TreeNode usersCnNode = null;
+                    TreeNode computersCnNode = null;
+
+                    if (includeUsersCn) usersCnNode = TryAddContainerNode(rootDe, rootNode, "CN=Users");
+                    if (includeComputersCn) computersCnNode = TryAddContainerNode(rootDe, rootNode, "CN=Computers");
+
+                    if (usersCnNode != null) AddAccountsToNode(rootDe, usersCnNode, includeUsers: true, includeComputers: false);
+                    if (computersCnNode != null) AddAccountsToNode(rootDe, computersCnNode, includeUsers: false, includeComputers: true);
 
                     // OU
                     foreach (DirectoryEntry ouChild in rootDe.Children)
@@ -438,6 +503,11 @@ namespace AD
                         {
                             var ouNode = CreateOuTreeNode(ouChild);
                             rootNode.Nodes.Add(ouNode);
+
+                            // Добавляем аккаунты в этом OU
+                            AddAccountsToNode(ouChild, ouNode, includeUsersCn, includeComputersCn);
+
+                            // Идём глубже
                             PopulateOuChildrenRecursively(ouChild, ouNode, includeUsersCn, includeComputersCn);
                         }
                     }
@@ -464,6 +534,10 @@ namespace AD
                     {
                         var ouNode = CreateOuTreeNode(child);
                         parentNode.Nodes.Add(ouNode);
+
+                        // Загружаем пользователей/компьютеры уровня этого OU
+                        AddAccountsToNode(child, ouNode, includeUsersCn, includeComputersCn);
+
                         PopulateOuChildrenRecursively(child, ouNode, includeUsersCn, includeComputersCn);
                     }
                     else if (IsObjectClass(child, "container"))
@@ -473,20 +547,30 @@ namespace AD
                         var name = SafeProp(child, "name");
                         var node = new TreeNode($"{name} (CN)")
                         {
-                            Tag = new OuNodeTag { Name = name, DistinguishedName = dn, Kind = NodeKind.Container }
+                            Tag = new OuNodeTag { Name = name, DistinguishedName = dn, Kind = NodeKind.Container },
+                            ImageKey = "container",
+                            SelectedImageKey = "container"
                         };
                         parentNode.Nodes.Add(node);
+
+                        // подгружаем аккаунты в этом контейнере
+                        AddAccountsToNode(child, node, includeUsersCn, includeComputersCn);
                     }
                     else if (includeUsersCn && NameEquals(child, "CN=Users"))
                     {
-                        TryAddContainerNode(parentDe, parentNode, "CN=Users");
+                        var cnNode = TryAddContainerNode(parentDe, parentNode, "CN=Users");
+                        if (cnNode != null) AddAccountsToNode(child, cnNode, includeUsers: true, includeComputers: false);
                     }
                     else if (includeComputersCn && NameEquals(child, "CN=Computers"))
                     {
-                        TryAddContainerNode(parentDe, parentNode, "CN=Computers");
+                        var cnNode = TryAddContainerNode(parentDe, parentNode, "CN=Computers");
+                        if (cnNode != null) AddAccountsToNode(child, cnNode, includeUsers: false, includeComputers: true);
                     }
                 }
-                catch { /* пропускаем проблемные ветки */ }
+                catch
+                {
+                    // пропускаем проблемные ветки
+                }
             }
         }
 
@@ -496,12 +580,14 @@ namespace AD
             var name = SafeProp(de, "name");
             var node = new TreeNode($"{name} (OU)")
             {
-                Tag = new OuNodeTag { Name = name, DistinguishedName = dn, Kind = NodeKind.OrganizationalUnit }
+                Tag = new OuNodeTag { Name = name, DistinguishedName = dn, Kind = NodeKind.OrganizationalUnit },
+                ImageKey = "ou",
+                SelectedImageKey = "ou"
             };
             return node;
         }
 
-        private void TryAddContainerNode(DirectoryEntry parent, TreeNode parentNode, string cnName)
+        private TreeNode TryAddContainerNode(DirectoryEntry parent, TreeNode parentNode, string cnName)
         {
             try
             {
@@ -522,13 +608,98 @@ namespace AD
                     {
                         var node = new TreeNode($"{name} (CN)")
                         {
-                            Tag = new OuNodeTag { Name = name ?? dn, DistinguishedName = dn, Kind = NodeKind.Container }
+                            Tag = new OuNodeTag { Name = name ?? dn, DistinguishedName = dn, Kind = NodeKind.Container },
+                            ImageKey = "container",
+                            SelectedImageKey = "container"
                         };
                         parentNode.Nodes.Add(node);
+                        return node;
                     }
                 }
             }
             catch { /* необязательно */ }
+            return null;
+        }
+
+        private void AddAccountsToNode(DirectoryEntry containerDe, TreeNode parentNode, bool includeUsers, bool includeComputers)
+        {
+            try
+            {
+                using var ds = new DirectorySearcher(containerDe)
+                {
+                    SearchScope = SearchScope.OneLevel,
+                    PageSize = 200
+                };
+
+                if (includeUsers)
+                {
+                    ds.Filter = "(&(|(objectCategory=person))(objectClass=user))";
+                    ds.PropertiesToLoad.Clear();
+                    ds.PropertiesToLoad.Add("name");
+                    ds.PropertiesToLoad.Add("displayName");
+                    ds.PropertiesToLoad.Add("sAMAccountName");
+                    ds.PropertiesToLoad.Add("distinguishedName");
+
+                    foreach (SearchResult r in ds.FindAll())
+                    {
+                        var dn = r.Properties["distinguishedName"]?.Count > 0 ? r.Properties["distinguishedName"][0]?.ToString() : null;
+                        var sam = r.Properties["sAMAccountName"]?.Count > 0 ? r.Properties["sAMAccountName"][0]?.ToString() : null;
+                        var disp = r.Properties["displayName"]?.Count > 0 ? r.Properties["displayName"][0]?.ToString() : null;
+                        var nm = r.Properties["name"]?.Count > 0 ? r.Properties["name"][0]?.ToString() : null;
+
+                        var shown = !string.IsNullOrWhiteSpace(disp) ? disp : nm ?? sam ?? "(user)";
+                        var userNode = new TreeNode(shown)
+                        {
+                            Tag = new AccountNodeTag
+                            {
+                                Name = shown,
+                                SamAccountName = sam,
+                                DistinguishedName = dn,
+                                Kind = NodeKind.User
+                            },
+                            ImageKey = "user",
+                            SelectedImageKey = "user"
+                        };
+                        parentNode.Nodes.Add(userNode);
+                    }
+                }
+
+                if (includeComputers)
+                {
+                    ds.Filter = "(objectClass=computer)";
+                    ds.PropertiesToLoad.Clear();
+                    ds.PropertiesToLoad.Add("name");
+                    ds.PropertiesToLoad.Add("sAMAccountName");
+                    ds.PropertiesToLoad.Add("distinguishedName");
+
+                    foreach (SearchResult r in ds.FindAll())
+                    {
+                        var dn = r.Properties["distinguishedName"]?.Count > 0 ? r.Properties["distinguishedName"][0]?.ToString() : null;
+                        var sam = r.Properties["sAMAccountName"]?.Count > 0 ? r.Properties["sAMAccountName"][0]?.ToString() : null;
+                        var nm = r.Properties["name"]?.Count > 0 ? r.Properties["name"][0]?.ToString() : null;
+
+                        var shown = (nm ?? sam ?? "(computer)")?.TrimEnd('$');
+
+                        var compNode = new TreeNode(shown)
+                        {
+                            Tag = new AccountNodeTag
+                            {
+                                Name = shown,
+                                SamAccountName = sam,
+                                DistinguishedName = dn,
+                                Kind = NodeKind.Computer
+                            },
+                            ImageKey = "computer",
+                            SelectedImageKey = "computer"
+                        };
+                        parentNode.Nodes.Add(compNode);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                LogErr("Не удалось загрузить объекты в узел: " + ex.Message);
+            }
         }
 
         private string GetDefaultNamingContext(string domainFqdn)
@@ -610,16 +781,11 @@ namespace AD
             g = SlugifyAscii(g);
             s = SlugifyAscii(s);
 
-            // Базовый вариант: i.surname (ivan → i, Иванов → ivanov)
+            // Базовый вариант: i.surname
             var initial = g.Length > 0 ? g[0].ToString() : "";
             var cand = (initial.Length > 0 ? $"{initial}.{s}" : s);
 
-            // sAMAccountName лимит 20 символов
-            cand = TrimSamToMax(cand);
-
-            // без точек в конце и начале
-            cand = cand.Trim('.');
-
+            cand = TrimSamToMax(cand).Trim('.');
             if (string.IsNullOrWhiteSpace(cand)) cand = "user";
 
             return cand.ToLowerInvariant();
@@ -635,12 +801,10 @@ namespace AD
 
             var baseNormalized = Normalize(baseSam);
 
-            // Набор «умных» кандидатов до добавления цифр
             var candidates = new List<string>();
             void AddIf(string x)
             {
-                x = TrimSamToMax(x);
-                x = x.Trim('.');
+                x = TrimSamToMax(x).Trim('.');
                 if (!string.IsNullOrWhiteSpace(x)) candidates.Add(x.ToLowerInvariant());
             }
 
@@ -652,13 +816,11 @@ namespace AD
             if (!string.IsNullOrEmpty(i) && !string.IsNullOrEmpty(s)) AddIf($"{i}{s}");
             if (!string.IsNullOrEmpty(s) && !string.IsNullOrEmpty(i)) AddIf($"{s}{i}");
 
-            // Перебор кандидатов без цифр
             foreach (var cand in candidates.Distinct())
             {
                 if (FindUser(ctx, cand) == null) return cand;
             }
 
-            // Если занято — добавляем числа (1..999), стараясь уместиться в 20 символов
             var baseCore = candidates.FirstOrDefault() ?? baseNormalized;
             baseCore = TrimSamToMax(baseCore);
 
@@ -666,12 +828,10 @@ namespace AD
             {
                 var suffix = n.ToString();
                 var trimmed = baseCore;
-                // укорачиваем, чтобы поместился суффикс
                 if (trimmed.Length + suffix.Length > maxLen)
                     trimmed = trimmed.Substring(0, Math.Max(0, maxLen - suffix.Length));
 
-                var attempt = (trimmed + suffix).Trim('.');
-                attempt = attempt.ToLowerInvariant();
+                var attempt = (trimmed + suffix).Trim('.').ToLowerInvariant();
                 if (attempt.Length == 0) continue;
 
                 if (FindUser(ctx, attempt) == null)
@@ -684,7 +844,7 @@ namespace AD
             throw new InvalidOperationException("Не удалось подобрать свободный sAMAccountName.");
         }
 
-        // Транслитерация RU→EN (упрощённая, «ГОСТ-подобная», без диакритики)
+        // Транслитерация RU→EN (упрощённая)
         private static string TransliterateRuToEn(string src)
         {
             if (string.IsNullOrWhiteSpace(src)) return "";
@@ -723,7 +883,6 @@ namespace AD
                 ['э'] = "e",
                 ['ю'] = "yu",
                 ['я'] = "ya",
-
                 ['А'] = "a",
                 ['Б'] = "b",
                 ['В'] = "v",
@@ -768,7 +927,7 @@ namespace AD
             return sb.ToString();
         }
 
-        // Оставляем только [a-z0-9.-], переводим в lower, заменяем пробелы/подчёркивания на точку
+        // Оставляем только [a-z0-9.-], lower; заменяем пробелы/подчёркивания на точку
         private static string SlugifyAscii(string s)
         {
             if (string.IsNullOrWhiteSpace(s)) return "";
@@ -780,12 +939,9 @@ namespace AD
             {
                 if ((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '.' || ch == '-')
                     sb.Append(ch);
-                // остальные символы пропускаем
             }
 
-            // Склеиваем множественные точки
             var res = Regex.Replace(sb.ToString(), @"\.{2,}", ".");
-            // Убираем точку в начале/конце
             res = res.Trim('.');
             return res;
         }
@@ -797,7 +953,6 @@ namespace AD
         }
 
         // ===== Генерация безопасного пароля =====
-
         private static string GenerateSecurePassword(int length = 16)
         {
             if (length < 12) length = 12; // разумный минимум
@@ -809,21 +964,18 @@ namespace AD
 
             var sets = new[] { U, L, D, S };
 
-            // Гарантируем по одному символу из каждого набора
             var chars = new List<char>();
             foreach (var set in sets)
                 chars.Add(GetRandomChar(set));
 
-            // Остальное добиваем случайно из всех наборов
             string all = string.Concat(sets);
             while (chars.Count < length)
             {
                 var c = GetRandomChar(all);
-                if (chars.Count > 0 && chars[^1] == c) continue; // избегаем подряд повторов
+                if (chars.Count > 0 && chars[^1] == c) continue;
                 chars.Add(c);
             }
 
-            // Перемешиваем
             Shuffle(chars);
 
             return new string(chars.ToArray());
@@ -893,7 +1045,7 @@ namespace AD
             {
                 var n = de.Properties["name"]?.Value?.ToString();
                 return string.Equals("name=" + n, expected, StringComparison.OrdinalIgnoreCase) ||
-                       string.Equals(n, expected.Split('=').Last(), StringComparison.OrdinalIgnoreCase);
+                       string.Equals(n, expected.split('=')[1], StringComparison.OrdinalIgnoreCase);
             }
             catch { return false; }
         }
@@ -923,6 +1075,7 @@ namespace AD
             return sb.ToString();
         }
 
+        // Узлы дерева
         private class OuNodeTag
         {
             public string Name { get; set; }
@@ -930,11 +1083,21 @@ namespace AD
             public NodeKind Kind { get; set; }
         }
 
+        private class AccountNodeTag
+        {
+            public string Name { get; set; }
+            public string SamAccountName { get; set; }
+            public string DistinguishedName { get; set; }
+            public NodeKind Kind { get; set; } // User / Computer
+        }
+
         private enum NodeKind
         {
             DomainRoot,
             OrganizationalUnit,
-            Container
+            Container,
+            User,
+            Computer
         }
     }
 }
