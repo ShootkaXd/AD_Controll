@@ -389,65 +389,135 @@ namespace AD
         public static List<OuNodeTag> FetchChildContainers(string domainFqdn, string parentDn)
         {
             var result = new List<OuNodeTag>();
-            using var parent = new DirectoryEntry(BuildLdapPath(domainFqdn, parentDn));
-            using var ds = new DirectorySearcher(parent)
+
+            using var parent = new DirectoryEntry(
+                BuildLdapPath(domainFqdn, parentDn),
+                null, null, AuthenticationTypes.Secure // явная безопасная аутентификация
+            );
+
+            // 1) Попытка через DirectorySearcher (быстро)
+            using (var ds = new DirectorySearcher(parent))
             {
-                Filter = "(|(objectClass=organizationalUnit)(objectClass=container))",
-                SearchScope = SearchScope.OneLevel,
-                PageSize = 1000,
-                PropertyNamesOnly = true
-            };
-            ds.PropertiesToLoad.Add("name");
-            ds.PropertiesToLoad.Add("distinguishedName");
-            ds.PropertiesToLoad.Add("objectClass");
+                ds.SearchScope = SearchScope.OneLevel;
+                ds.PageSize = 1000;
+                ds.PropertyNamesOnly = true;
+                ds.ReferralChasing = ReferralChasingOption.All;
+                // Более совместимый фильтр для OU и контейнеров
+                ds.Filter =
+                    "(|" +
+                      "(&(objectClass=organizationalUnit)(objectCategory=organizationalUnit))" +
+                      "(&(objectClass=container)(!(objectClass=computer)) )" + // «чистые» контейнеры
+                    ")";
 
-            foreach (SearchResult r in ds.FindAll())
-            {
-                var dn = r.Properties["distinguishedName"]?.Count > 0 ? r.Properties["distinguishedName"][0]?.ToString() : null;
-                var name = r.Properties["name"]?.Count > 0 ? r.Properties["name"][0]?.ToString() : null;
+                ds.PropertiesToLoad.Add("name");
+                ds.PropertiesToLoad.Add("distinguishedName");
+                ds.PropertiesToLoad.Add("objectClass");
 
-                if (string.IsNullOrWhiteSpace(dn) || string.IsNullOrWhiteSpace(name)) continue;
-
-                NodeKind kind = NodeKind.Container;
-                var oc = r.Properties["objectClass"];
-                if (oc != null)
+                try
                 {
-                    foreach (var v in oc)
+                    foreach (SearchResult r in ds.FindAll())
                     {
-                        var s = v?.ToString();
-                        if (string.Equals(s, "organizationalUnit", StringComparison.OrdinalIgnoreCase))
+                        var dn = r.Properties["distinguishedName"]?.Count > 0 ? r.Properties["distinguishedName"][0]?.ToString() : null;
+                        var name = r.Properties["name"]?.Count > 0 ? r.Properties["name"][0]?.ToString() : null;
+                        if (string.IsNullOrWhiteSpace(dn) || string.IsNullOrWhiteSpace(name)) continue;
+
+                        var kind = NodeKind.Container;
+                        var oc = r.Properties["objectClass"];
+                        if (oc != null)
                         {
-                            kind = NodeKind.OrganizationalUnit; break;
+                            foreach (var v in oc)
+                            {
+                                if (string.Equals(v?.ToString(), "organizationalUnit", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    kind = NodeKind.OrganizationalUnit; break;
+                                }
+                            }
                         }
+
+                        result.Add(new OuNodeTag { Name = name, DistinguishedName = dn, Kind = kind });
                     }
                 }
-
-                result.Add(new OuNodeTag { Name = name, DistinguishedName = dn, Kind = kind });
+                catch
+                {
+                    // Переходим к резервному способу ниже
+                }
             }
+
+            // 2) РЕЗЕРВ: прямой обход Children (работает там, где DS «молчит»)
+            if (result.Count == 0)
+            {
+                foreach (DirectoryEntry ch in parent.Children)
+                {
+                    try
+                    {
+                        var cls = ch.SchemaClassName; // быстрее, чем objectClass
+                        if (!string.Equals(cls, "organizationalUnit", StringComparison.OrdinalIgnoreCase) &&
+                            !string.Equals(cls, "container", StringComparison.OrdinalIgnoreCase))
+                            continue;
+
+                        var dn = SafeProp(ch, "distinguishedName");
+                        var name = SafeProp(ch, "name");
+                        if (string.IsNullOrWhiteSpace(dn) || string.IsNullOrWhiteSpace(name)) continue;
+
+                        var kind = string.Equals(cls, "organizationalUnit", StringComparison.OrdinalIgnoreCase)
+                                   ? NodeKind.OrganizationalUnit : NodeKind.Container;
+
+                        result.Add(new OuNodeTag { Name = name, DistinguishedName = dn, Kind = kind });
+                    }
+                    catch { /* пропускаем проблемные ветки */ }
+                }
+            }
+
             return result;
         }
 
         public static OuNodeTag TryGetNamedContainer(string domainFqdn, string baseDn, string cnName)
         {
-            using var baseDe = new DirectoryEntry(BuildLdapPath(domainFqdn, baseDn));
+            using var baseDe = new DirectoryEntry(
+                BuildLdapPath(domainFqdn, baseDn),
+                null, null, AuthenticationTypes.Secure
+            );
             using var ds = new DirectorySearcher(baseDe)
             {
-                Filter = $"(&(objectClass=container)(name={EscapeLdapValue(cnName.Split('=')[1])}))",
                 SearchScope = SearchScope.OneLevel,
                 PageSize = 50,
-                PropertyNamesOnly = true
+                PropertyNamesOnly = true,
+                ReferralChasing = ReferralChasingOption.All,
+                Filter = $"(&(objectClass=container)(name={EscapeLdapValue(cnName.Split('=')[1])}))"
             };
+
             ds.PropertiesToLoad.Add("name");
             ds.PropertiesToLoad.Add("distinguishedName");
 
-            var res = ds.FindOne();
-            if (res == null) return null;
+            try
+            {
+                var res = ds.FindOne();
+                if (res != null)
+                {
+                    var dn = res.Properties["distinguishedName"]?.Count > 0 ? res.Properties["distinguishedName"][0]?.ToString() : null;
+                    var name = res.Properties["name"]?.Count > 0 ? res.Properties["name"][0]?.ToString() : null;
+                    if (!string.IsNullOrWhiteSpace(dn))
+                        return new OuNodeTag { Name = name ?? dn, DistinguishedName = dn, Kind = NodeKind.Container };
+                }
+            }
+            catch
+            {
+                // Резерв через Children
+                foreach (DirectoryEntry ch in baseDe.Children)
+                {
+                    try
+                    {
+                        if (!string.Equals(ch.SchemaClassName, "container", StringComparison.OrdinalIgnoreCase)) continue;
+                        var n = SafeProp(ch, "name");
+                        if (!string.Equals(n, cnName.Split('=')[1], StringComparison.OrdinalIgnoreCase)) continue;
 
-            var dn = res.Properties["distinguishedName"]?.Count > 0 ? res.Properties["distinguishedName"][0]?.ToString() : null;
-            var name = res.Properties["name"]?.Count > 0 ? res.Properties["name"][0]?.ToString() : null;
-            if (string.IsNullOrWhiteSpace(dn)) return null;
-
-            return new OuNodeTag { Name = name ?? dn, DistinguishedName = dn, Kind = NodeKind.Container };
+                        var dn = SafeProp(ch, "distinguishedName");
+                        return new OuNodeTag { Name = n, DistinguishedName = dn, Kind = NodeKind.Container };
+                    }
+                    catch { }
+                }
+            }
+            return null;
         }
 
         public static List<AccountNodeTag> FetchAccounts(string domainFqdn, string containerDn, bool includeUsers, bool includeComputers)
