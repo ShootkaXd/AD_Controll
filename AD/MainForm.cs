@@ -3,16 +3,59 @@ using System.Collections.Generic;
 using System.DirectoryServices;
 using System.DirectoryServices.AccountManagement;
 using System.Drawing;
+using System.IO;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace AD
 {
+    // ------------------------- Плоский TabControl (заголовки только) -------------------------
+    internal class FlatTabControl : TabControl
+    {
+        public bool DarkMode { get; set; } = false;
+
+        public FlatTabControl()
+        {
+            SetStyle(ControlStyles.UserPaint |
+                     ControlStyles.AllPaintingInWmPaint |
+                     ControlStyles.OptimizedDoubleBuffer, true);
+
+            DrawMode = TabDrawMode.OwnerDrawFixed;
+            SizeMode = TabSizeMode.Fixed;
+            ItemSize = new Size(140, 28);
+            Padding = new Point(12, 4);
+        }
+
+        protected override void OnDrawItem(DrawItemEventArgs e)
+        {
+            var sel = (e.State & DrawItemState.Selected) == DrawItemState.Selected;
+            var rect = e.Bounds;
+            var page = TabPages[e.Index];
+
+            Color back = sel
+                ? (DarkMode ? Color.FromArgb(43, 49, 58) : Color.White)
+                : (DarkMode ? Color.FromArgb(34, 40, 49) : Color.FromArgb(246, 248, 250));
+            Color text = DarkMode ? Color.Gainsboro : Color.FromArgb(33, 37, 41);
+
+            using (var b = new SolidBrush(back)) e.Graphics.FillRectangle(b, rect);
+            TextRenderer.DrawText(e.Graphics, page.Text, Font, rect, text,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+
+            if (!DarkMode && sel)
+            {
+                using var p = new Pen(Color.FromArgb(28, 164, 97), 2);
+                e.Graphics.DrawLine(p, rect.Left, rect.Bottom - 1, rect.Right, rect.Bottom - 1);
+            }
+        }
+    }
+
+    // -------------------------------------------- Форма --------------------------------------------
     public class MainForm : Form
     {
         // Верхняя панель
-        private TextBox txtDomain; // corp.contoso.com (опционально)
+        private TextBox txtDomain;
 
         // Вкладка Пользователь
         private TreeView tvUsers;
@@ -29,7 +72,7 @@ namespace AD
         private CheckBox chkShowPassword;
         private CheckBox chkMustChange;
         private Button btnCreateUser;
-        private Button btnLoadUsersHere;    // показать объекты в выбранном узле
+        private Button btnLoadUsersHere;
 
         // Вкладка Компьютер
         private TreeView tvComputers;
@@ -37,186 +80,257 @@ namespace AD
         private Button btnRefreshComputersTree;
         private TextBox txtCompName;
         private Button btnCreateComputer;
-        private Button btnLoadComputersHere;// показать объекты в выбранном узле
+        private Button btnLoadComputersHere;
 
         // Иконки
         private ImageList _icons;
 
-        // Лог
-        private TextBox txtLog;
+        // Лог (без мигания)
+        private RichTextBox txtLog;
 
-        // Версия
+        // Статус-бар
         private StatusStrip status;
         private ToolStripStatusLabel statusVersion;
 
-        // Lazy-load / async
+        // Lazy-load
         private CancellationTokenSource _treeCts;
         private const string DummyNodeText = "…";
 
+        // WM_SETREDRAW для безмигающего логирования
+        [DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+        private const int WM_SETREDRAW = 0x000B;
+
         public MainForm()
         {
+            // DPI + double buffer (без WS_EX_COMPOSITED)
+            AutoScaleMode = AutoScaleMode.Dpi;
+            AutoScaleDimensions = new SizeF(96, 96);
+            SetStyle(ControlStyles.OptimizedDoubleBuffer |
+                     ControlStyles.AllPaintingInWmPaint |
+                     ControlStyles.UserPaint, true);
+            UpdateStyles();
+
             Text = "AD Manager — пользователи и компьютеры";
-            Width = 1150;
-            Height = 780;
             StartPosition = FormStartPosition.CenterScreen;
+            Width = 1200;
+            Height = 800;
 
-            // === Главное меню ===
-            var menu = new MenuStrip();
-            var miFile = new ToolStripMenuItem("Файл");
-            var miExit = new ToolStripMenuItem("Выход", null, (s, e) => Close());
-            miFile.DropDownItems.Add(miExit);
+            ApplyTheme();
 
-            var miHelp = new ToolStripMenuItem("Справка");
-            var miAbout = new ToolStripMenuItem("О программе…", null, (s, e) =>
+            // === Зелёная шапка ===
+            var top = new Panel { Dock = DockStyle.Top, Height = 64, BackColor = Color.FromArgb(28, 164, 97) };
+            Controls.Add(top);
+
+            var caption = new Label
             {
-                MessageBox.Show($"AD Manager\n{AppVersion.FullVersion}\n© {DateTime.Now:yyyy}",
-                    "О программе", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            });
+                Text = "AD Manager",
+                ForeColor = Color.White,
+                Font = new Font("Segoe UI Semibold", 16f, FontStyle.Bold),
+                AutoSize = true,
+                Location = new Point(16, 16)
+            };
+            top.Controls.Add(caption);
 
-            miHelp.DropDownItems.Add(miAbout);
-            menu.Items.Add(miFile);
-            menu.Items.Add(miHelp);
-            MainMenuStrip = menu;
-            Controls.Add(menu);
+            // Правая часть: домен + кнопка
+            var domWrap = new Panel { Dock = DockStyle.Right, Width = 520, Padding = new Padding(0, 14, 16, 14) };
+            top.Controls.Add(domWrap);
 
-            // === Статус-бар с версией ===
+            var lblDom = new Label
+            {
+                Text = "Домен (FQDN):",
+                ForeColor = Color.White,
+                Font = new Font("Segoe UI", 9f),
+                AutoSize = true,
+                Dock = DockStyle.Top
+            };
+            domWrap.Controls.Add(lblDom);
+
+            var domRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, Padding = new Padding(0, 4, 0, 0) };
+            domRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            domRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 48));
+            domWrap.Controls.Add(domRow);
+
+            txtDomain = new TextBox { Dock = DockStyle.Fill, PlaceholderText = "corp.contoso.com (необязательно)" };
+            domRow.Controls.Add(txtDomain, 0, 0);
+
+            var btnApplyDomain = new Button
+            {
+                Text = "✓",
+                Dock = DockStyle.Fill,
+                FlatStyle = FlatStyle.Flat,
+                ForeColor = Color.White,
+                BackColor = Color.FromArgb(22, 132, 79)
+            };
+            btnApplyDomain.FlatAppearance.BorderSize = 0;
+            btnApplyDomain.Click += (s, e) =>
+            {
+                BuildOuTree(tvUsers, lblUsersDn, includeUsersCn: true, includeComputersCn: false);
+                BuildOuTree(tvComputers, lblComputersDn, includeUsersCn: false, includeComputersCn: true);
+            };
+            domRow.Controls.Add(btnApplyDomain, 1, 0);
+
+            // === Тулбар ===
+            var toolbar = CreateToolbar();
+            toolbar.Dock = DockStyle.Top;
+            Controls.Add(toolbar);
+            toolbar.BringToFront();
+            top.BringToFront();
+
+            // === Статус-бар ===
             status = new StatusStrip();
             statusVersion = new ToolStripStatusLabel($"Версия: {AppVersion.FullVersion}");
             status.Items.Add(statusVersion);
             Controls.Add(status);
 
-            // === Корневой лэйаут ===
-            var root = new TableLayoutPanel
+            // === Центральная область: левый сайдбар + контент ===
+            var body = new SplitContainer
             {
                 Dock = DockStyle.Fill,
-                ColumnCount = 1,
-                RowCount = 3,
+                SplitterDistance = 330,
+                BorderStyle = BorderStyle.None,
+                SplitterWidth = 2,
+                BackColor = Color.FromArgb(34, 40, 49)
             };
-            root.RowStyles.Add(new RowStyle(SizeType.AutoSize));   // общая панель
-            root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));// вкладки + лог
-            root.RowStyles.Add(new RowStyle(SizeType.AutoSize));   // статус-бар (уже добавлен)
-            Controls.Add(root);
+            body.Panel1.BackColor = Color.FromArgb(34, 40, 49);
+            body.Panel2.BackColor = Color.White;
+            Controls.Add(body);
+            body.BringToFront();
 
-            // === Общая панель сверху ===
-            var pnlCommon = new TableLayoutPanel
-            {
-                Dock = DockStyle.Top,
-                ColumnCount = 2,
-                AutoSize = true,
-                Padding = new Padding(8),
-            };
-            pnlCommon.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-            pnlCommon.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            pnlCommon.Controls.Add(new Label { Text = "Домен (FQDN):", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 0);
-            txtDomain = new TextBox { Anchor = AnchorStyles.Left | AnchorStyles.Right, PlaceholderText = "corp.contoso.com (необязательно)" };
-            pnlCommon.Controls.Add(txtDomain, 1, 0);
-
-            root.Controls.Add(pnlCommon, 0, 0);
-
-            // === Средняя зона: вкладки + лог ===
-            var mid = new TableLayoutPanel
+            // ----- Левый сайдбар (плоские тёмные вкладки) -----
+            var sidebar = new FlatTabControl
             {
                 Dock = DockStyle.Fill,
-                ColumnCount = 1,
-                RowCount = 2,
+                DarkMode = true,
+                ItemSize = new Size(160, 28)
             };
-            mid.RowStyles.Add(new RowStyle(SizeType.Percent, 64));
-            mid.RowStyles.Add(new RowStyle(SizeType.Percent, 36));
-            root.Controls.Add(mid, 0, 1);
+            body.Panel1.Padding = new Padding(8);
+            body.Panel1.Controls.Add(sidebar);
 
-            // === Вкладки ===
-            var tabs = new TabControl { Dock = DockStyle.Fill };
-            mid.Controls.Add(tabs, 0, 0);
+            var tabLeftUsers = new TabPage("OU (пользователи)") { BackColor = Color.FromArgb(34, 40, 49) };
+            var tabLeftComps = new TabPage("OU (компьютеры)") { BackColor = Color.FromArgb(34, 40, 49) };
+            sidebar.TabPages.Add(tabLeftUsers);
+            sidebar.TabPages.Add(tabLeftComps);
 
-            var tabUser = new TabPage("Пользователь");
-            var tabComp = new TabPage("Компьютер");
+            // Левая вкладка — пользователи
+            var leftUsersWrap = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, Padding = new Padding(4) };
+            leftUsersWrap.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            leftUsersWrap.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            leftUsersWrap.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            tabLeftUsers.Controls.Add(leftUsersWrap);
+
+            btnRefreshUsersTree = MakeGreenBtn("Обновить OU");
+            btnRefreshUsersTree.Click += (s, e) => BuildOuTree(tvUsers, lblUsersDn, includeUsersCn: true, includeComputersCn: false);
+            leftUsersWrap.Controls.Add(btnRefreshUsersTree, 0, 0);
+
+            tvUsers = new TreeView
+            {
+                Dock = DockStyle.Fill,
+                HideSelection = false,
+                BorderStyle = BorderStyle.None,
+                BackColor = Color.FromArgb(43, 49, 58),
+                ForeColor = Color.Gainsboro
+            };
+            tvUsers.BeforeExpand += Tv_BeforeExpand_LoadChildren;
+            tvUsers.AfterSelect += (s, e) =>
+            {
+                if (e.Node?.Tag is OuNodeTag tagOu) lblUsersDn.Text = "Выбрано: " + tagOu.DistinguishedName;
+                else if (e.Node?.Tag is AccountNodeTag tagAcc) lblUsersDn.Text = $"Выбрано: {tagAcc.Kind}: {tagAcc.DistinguishedName}";
+                else lblUsersDn.Text = "Выбрано: —";
+            };
+            // смена иконки открытой/закрытой папки
+            tvUsers.AfterExpand += Tree_AfterExpandCollapse;
+            tvUsers.AfterCollapse += Tree_AfterExpandCollapse;
+
+            leftUsersWrap.Controls.Add(tvUsers, 0, 1);
+
+            lblUsersDn = new Label { Text = "Выбрано: —", ForeColor = Color.WhiteSmoke, Dock = DockStyle.Fill, Padding = new Padding(4, 6, 4, 6) };
+            leftUsersWrap.Controls.Add(lblUsersDn, 0, 2);
+
+            // Левая вкладка — компьютеры
+            var leftCompsWrap = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, Padding = new Padding(4) };
+            leftCompsWrap.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            leftCompsWrap.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            leftCompsWrap.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            tabLeftComps.Controls.Add(leftCompsWrap);
+
+            btnRefreshComputersTree = MakeGreenBtn("Обновить OU");
+            btnRefreshComputersTree.Click += (s, e) => BuildOuTree(tvComputers, lblComputersDn, includeUsersCn: false, includeComputersCn: true);
+            leftCompsWrap.Controls.Add(btnRefreshComputersTree, 0, 0);
+
+            tvComputers = new TreeView
+            {
+                Dock = DockStyle.Fill,
+                HideSelection = false,
+                BorderStyle = BorderStyle.None,
+                BackColor = Color.FromArgb(43, 49, 58),
+                ForeColor = Color.Gainsboro
+            };
+            tvComputers.BeforeExpand += Tv_BeforeExpand_LoadChildren;
+            tvComputers.AfterSelect += (s, e) =>
+            {
+                if (e.Node?.Tag is OuNodeTag tagOu) lblComputersDn.Text = "Выбрано: " + tagOu.DistinguishedName;
+                else if (e.Node?.Tag is AccountNodeTag tagAcc) lblComputersDn.Text = $"Выбрано: {tagAcc.Kind}: {tagAcc.DistinguishedName}";
+                else lblComputersDn.Text = "Выбрано: —";
+            };
+            tvComputers.AfterExpand += Tree_AfterExpandCollapse;
+            tvComputers.AfterCollapse += Tree_AfterExpandCollapse;
+
+            leftCompsWrap.Controls.Add(tvComputers, 0, 1);
+
+            lblComputersDn = new Label { Text = "Выбрано: —", ForeColor = Color.WhiteSmoke, Dock = DockStyle.Fill, Padding = new Padding(4, 6, 4, 6) };
+            leftCompsWrap.Controls.Add(lblComputersDn, 0, 2);
+
+            // ----- Правая панель: плоские светлые вкладки -----
+            var tabs = new FlatTabControl
+            {
+                Dock = DockStyle.Fill,
+                DarkMode = false,
+                ItemSize = new Size(120, 28),
+                BackColor = Color.White
+            };
+            body.Panel2.Padding = new Padding(12);
+            body.Panel2.Controls.Add(tabs);
+
+            var tabUser = new TabPage("Пользователь") { BackColor = Color.White };
+            var tabComp = new TabPage("Компьютер") { BackColor = Color.White };
             tabs.TabPages.Add(tabUser);
             tabs.TabPages.Add(tabComp);
 
-            // === Вкладка Пользователь ===
-            var splitUser = new SplitContainer
-            {
-                Dock = DockStyle.Fill,
-                Orientation = Orientation.Vertical,
-                SplitterDistance = 430
-            };
-            tabUser.Controls.Add(splitUser);
+            // Карточка: пользователь
+            var cardUser = MakeCard("Создание пользователя");
+            tabUser.Controls.Add(cardUser);
 
-            // Левая панель — дерево OU (пользователи)
-            var leftUser = new TableLayoutPanel
-            {
-                Dock = DockStyle.Fill,
-                ColumnCount = 1,
-                RowCount = 3,
-                Padding = new Padding(8)
-            };
-            leftUser.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            leftUser.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            leftUser.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            var gridUser = new TableLayoutPanel { Dock = DockStyle.Top, ColumnCount = 2, AutoSize = true, Padding = new Padding(6) };
+            gridUser.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            gridUser.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            cardUser.Controls.Add(gridUser);
 
-            btnRefreshUsersTree = new Button { Text = "Обновить OU", AutoSize = true };
-            btnRefreshUsersTree.Click += (s, e) => BuildOuTree(tvUsers, lblUsersDn, includeUsersCn: true, includeComputersCn: false);
-            leftUser.Controls.Add(btnRefreshUsersTree, 0, 0);
+            gridUser.Controls.Add(new Label { Text = "Имя:", AutoSize = true }, 0, 0);
+            txtGivenName = new TextBox { Dock = DockStyle.Fill };
+            gridUser.Controls.Add(txtGivenName, 1, 0);
 
-            tvUsers = new TreeView { Dock = DockStyle.Fill, HideSelection = false };
-            tvUsers.AfterSelect += (s, e) =>
-            {
-                if (e.Node?.Tag is OuNodeTag tagOu)
-                    lblUsersDn.Text = "Выбрано: " + tagOu.DistinguishedName;
-                else if (e.Node?.Tag is AccountNodeTag tagAcc)
-                    lblUsersDn.Text = $"Выбрано: {tagAcc.Kind}: {tagAcc.DistinguishedName}";
-                else
-                    lblUsersDn.Text = "Выбрано: —";
-            };
-            tvUsers.BeforeExpand += Tv_BeforeExpand_LoadChildren;
-            leftUser.Controls.Add(tvUsers, 0, 1);
+            gridUser.Controls.Add(new Label { Text = "Фамилия:", AutoSize = true }, 0, 1);
+            txtSurname = new TextBox { Dock = DockStyle.Fill };
+            gridUser.Controls.Add(txtSurname, 1, 1);
 
-            lblUsersDn = new Label { Text = "Выбрано: —", AutoSize = true, Padding = new Padding(0, 6, 0, 0) };
-            leftUser.Controls.Add(lblUsersDn, 0, 2);
-
-            splitUser.Panel1.Controls.Add(leftUser);
-
-            // Правая панель — форма создания пользователя
-            var pnlUserForm = new TableLayoutPanel
-            {
-                Dock = DockStyle.Fill,
-                ColumnCount = 2,
-                AutoSize = true,
-                Padding = new Padding(8)
-            };
-            pnlUserForm.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-            pnlUserForm.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-
-            pnlUserForm.Controls.Add(new Label { Text = "Имя:", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 0);
-            txtGivenName = new TextBox { Anchor = AnchorStyles.Left | AnchorStyles.Right };
-            pnlUserForm.Controls.Add(txtGivenName, 1, 0);
-
-            pnlUserForm.Controls.Add(new Label { Text = "Фамилия:", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 1);
-            txtSurname = new TextBox { Anchor = AnchorStyles.Left | AnchorStyles.Right };
-            pnlUserForm.Controls.Add(txtSurname, 1, 1);
-
-            // Логин + кнопка "Предложить логин"
-            pnlUserForm.Controls.Add(new Label { Text = "Логин (sAMAccountName):", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 2);
-            var pnlSam = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
+            gridUser.Controls.Add(new Label { Text = "Логин (sAMAccountName):", AutoSize = true }, 0, 2);
+            var samRow = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Dock = DockStyle.Fill, WrapContents = false };
             txtSam = new TextBox { Width = 220, PlaceholderText = "например, i.ivanov" };
-            btnSuggestSam = new Button { Text = "Предложить логин", AutoSize = true };
-            btnSuggestSam.Click += (s, e) => AutoFillSam(force: true);
-            pnlSam.Controls.Add(txtSam);
-            pnlSam.Controls.Add(btnSuggestSam);
-            pnlUserForm.Controls.Add(pnlSam, 1, 2);
+            btnSuggestSam = MakeGreyBtn("Предложить", 120);
+            btnSuggestSam.Click += (s, e) => AutoFillSam(true);
+            samRow.Controls.AddRange(new Control[] { txtSam, btnSuggestSam });
+            gridUser.Controls.Add(samRow, 1, 2);
 
-            pnlUserForm.Controls.Add(new Label { Text = "UPN-суффикс:", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 3);
-            txtUpnSuffix = new TextBox { Anchor = AnchorStyles.Left | AnchorStyles.Right, PlaceholderText = "например, contoso.com" };
-            pnlUserForm.Controls.Add(txtUpnSuffix, 1, 3);
+            gridUser.Controls.Add(new Label { Text = "UPN-суффикс:", AutoSize = true }, 0, 3);
+            txtUpnSuffix = new TextBox { Dock = DockStyle.Fill };
+            gridUser.Controls.Add(txtUpnSuffix, 1, 3);
 
-            // Пароль + кнопки
-            pnlUserForm.Controls.Add(new Label { Text = "Начальный пароль:", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 4);
-            var pnlPwd = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
+            gridUser.Controls.Add(new Label { Text = "Начальный пароль:", AutoSize = true }, 0, 4);
+            var pwdRow = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Dock = DockStyle.Fill, WrapContents = false };
             txtPassword = new TextBox { Width = 220, UseSystemPasswordChar = true };
-            btnGenPassword = new Button { Text = "Сгенерировать", AutoSize = true };
-            btnCopyPassword = new Button { Text = "Копировать", AutoSize = true };
-            chkShowPassword = new CheckBox { Text = "Показать пароль", AutoSize = true };
-
+            btnGenPassword = MakeGreyBtn("Сгенерировать", 130);
+            btnCopyPassword = MakeGreyBtn("Копировать", 110);
+            chkShowPassword = new CheckBox { Text = "Показать", AutoSize = true };
             btnGenPassword.Click += (s, e) =>
             {
                 var pwd = AdUtils.GenerateSecurePassword(16);
@@ -225,169 +339,306 @@ namespace AD
             };
             btnCopyPassword.Click += (s, e) =>
             {
-                try
-                {
-                    var p = txtPassword.Text ?? string.Empty;
-                    if (string.IsNullOrEmpty(p)) { LogErr("Пароль пуст — нечего копировать."); return; }
-                    Clipboard.SetText(p);
-                    LogOk("Пароль скопирован в буфер обмена.");
-                }
-                catch (Exception ex) { LogErr("Не удалось скопировать пароль: " + ex.Message); }
+                var p = txtPassword.Text ?? string.Empty;
+                if (string.IsNullOrEmpty(p)) { LogErr("Пароль пуст — нечего копировать."); return; }
+                Clipboard.SetText(p);
+                LogOk("Пароль скопирован в буфер обмена.");
             };
-            chkShowPassword.CheckedChanged += (s, e) => { txtPassword.UseSystemPasswordChar = !chkShowPassword.Checked; };
+            chkShowPassword.CheckedChanged += (s, e) => txtPassword.UseSystemPasswordChar = !chkShowPassword.Checked;
+            pwdRow.Controls.AddRange(new Control[] { txtPassword, btnGenPassword, btnCopyPassword, chkShowPassword });
+            gridUser.Controls.Add(pwdRow, 1, 4);
 
-            pnlPwd.Controls.Add(txtPassword);
-            pnlPwd.Controls.Add(btnGenPassword);
-            pnlPwd.Controls.Add(btnCopyPassword);
-            pnlPwd.Controls.Add(chkShowPassword);
-            pnlUserForm.Controls.Add(pnlPwd, 1, 4);
+            chkMustChange = new CheckBox { Text = "Сменить пароль при первом входе", AutoSize = true, Dock = DockStyle.Top, Padding = new Padding(6) };
+            cardUser.Controls.Add(chkMustChange);
 
-            chkMustChange = new CheckBox { Text = "Сменить пароль при первом входе", AutoSize = true };
-            pnlUserForm.Controls.Add(chkMustChange, 1, 5);
-
-            btnCreateUser = new Button { Text = "Создать пользователя", AutoSize = true };
+            btnCreateUser = MakeGreenBtn("Создать пользователя");
             btnCreateUser.Click += BtnCreateUser_Click;
-            pnlUserForm.Controls.Add(btnCreateUser, 1, 6);
+            cardUser.Controls.Add(btnCreateUser);
 
-            // Кнопка «Показать объекты в выбранном узле»
-            btnLoadUsersHere = new Button { Text = "Показать объекты в выбранном узле", AutoSize = true };
+            btnLoadUsersHere = MakeGreyBtn("Показать объекты в выбранном узле", 260);
             btnLoadUsersHere.Click += async (s, e) =>
             {
                 if (tvUsers.SelectedNode?.Tag is OuNodeTag)
                 {
-                    try
-                    {
-                        Cursor = Cursors.WaitCursor;
-                        await LoadAccountsForNodeAsync(tvUsers.SelectedNode, includeUsers: true, includeComputers: false, CancellationToken.None);
-                    }
+                    try { Cursor = Cursors.WaitCursor; await LoadAccountsForNodeAsync(tvUsers.SelectedNode, includeUsers: true, includeComputers: false, CancellationToken.None); }
                     catch (Exception ex) { LogErr(ex.Message); }
                     finally { Cursor = Cursors.Default; }
                 }
             };
-            pnlUserForm.Controls.Add(btnLoadUsersHere, 1, 7);
+            cardUser.Controls.Add(btnLoadUsersHere);
 
-            // Автогенерация login при вводе ФИО
-            txtGivenName.TextChanged += (s, e) => AutoFillSam();
-            txtSurname.TextChanged += (s, e) => AutoFillSam();
+            // Карточка: компьютер
+            var cardComp = MakeCard("Создание компьютера");
+            tabComp.Controls.Add(cardComp);
 
-            splitUser.Panel2.Controls.Add(pnlUserForm);
+            var gridComp = new TableLayoutPanel { Dock = DockStyle.Top, ColumnCount = 2, AutoSize = true, Padding = new Padding(6) };
+            gridComp.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            gridComp.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            cardComp.Controls.Add(gridComp);
 
-            // === Вкладка Компьютер ===
-            var splitComp = new SplitContainer
-            {
-                Dock = DockStyle.Fill,
-                Orientation = Orientation.Vertical,
-                SplitterDistance = 430
-            };
-            tabComp.Controls.Add(splitComp);
+            gridComp.Controls.Add(new Label { Text = "Имя компьютера:", AutoSize = true }, 0, 0);
+            txtCompName = new TextBox { Dock = DockStyle.Fill, PlaceholderText = "например, PC-001" };
+            gridComp.Controls.Add(txtCompName, 1, 0);
 
-            // Левая панель — дерево OU (компьютеры)
-            var leftComp = new TableLayoutPanel
-            {
-                Dock = DockStyle.Fill,
-                ColumnCount = 1,
-                RowCount = 3,
-                Padding = new Padding(8)
-            };
-            leftComp.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            leftComp.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            leftComp.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-
-            btnRefreshComputersTree = new Button { Text = "Обновить OU", AutoSize = true };
-            btnRefreshComputersTree.Click += (s, e) => BuildOuTree(tvComputers, lblComputersDn, includeUsersCn: false, includeComputersCn: true);
-            leftComp.Controls.Add(btnRefreshComputersTree, 0, 0);
-
-            tvComputers = new TreeView { Dock = DockStyle.Fill, HideSelection = false };
-            tvComputers.AfterSelect += (s, e) =>
-            {
-                if (e.Node?.Tag is OuNodeTag tagOu)
-                    lblComputersDn.Text = "Выбрано: " + tagOu.DistinguishedName;
-                else if (e.Node?.Tag is AccountNodeTag tagAcc)
-                    lblComputersDn.Text = $"Выбрано: {tagAcc.Kind}: {tagAcc.DistinguishedName}";
-                else
-                    lblComputersDn.Text = "Выбрано: —";
-            };
-            tvComputers.BeforeExpand += Tv_BeforeExpand_LoadChildren;
-            leftComp.Controls.Add(tvComputers, 0, 1);
-
-            lblComputersDn = new Label { Text = "Выбрано: —", AutoSize = true, Padding = new Padding(0, 6, 0, 0) };
-            leftComp.Controls.Add(lblComputersDn, 0, 2);
-
-            splitComp.Panel1.Controls.Add(leftComp);
-
-            // Правая панель — форма создания компьютера
-            var pnlCompForm = new TableLayoutPanel
-            {
-                Dock = DockStyle.Fill,
-                ColumnCount = 2,
-                AutoSize = true,
-                Padding = new Padding(8)
-            };
-            pnlCompForm.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-            pnlCompForm.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-
-            pnlCompForm.Controls.Add(new Label { Text = "Имя компьютера:", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 0);
-            txtCompName = new TextBox { Anchor = AnchorStyles.Left | AnchorStyles.Right, PlaceholderText = "например, PC-001" };
-            pnlCompForm.Controls.Add(txtCompName, 1, 0);
-
-            btnCreateComputer = new Button { Text = "Создать компьютер", AutoSize = true };
+            btnCreateComputer = MakeGreenBtn("Создать компьютер");
             btnCreateComputer.Click += BtnCreateComputer_Click;
-            pnlCompForm.Controls.Add(btnCreateComputer, 1, 1);
+            cardComp.Controls.Add(btnCreateComputer);
 
-            // Кнопка «Показать объекты в выбранном узле»
-            btnLoadComputersHere = new Button { Text = "Показать объекты в выбранном узле", AutoSize = true };
+            btnLoadComputersHere = MakeGreyBtn("Показать объекты в выбранном узле", 260);
             btnLoadComputersHere.Click += async (s, e) =>
             {
                 if (tvComputers.SelectedNode?.Tag is OuNodeTag)
                 {
-                    try
-                    {
-                        Cursor = Cursors.WaitCursor;
-                        await LoadAccountsForNodeAsync(tvComputers.SelectedNode, includeUsers: false, includeComputers: true, CancellationToken.None);
-                    }
+                    try { Cursor = Cursors.WaitCursor; await LoadAccountsForNodeAsync(tvComputers.SelectedNode, includeUsers: false, includeComputers: true, CancellationToken.None); }
                     catch (Exception ex) { LogErr(ex.Message); }
                     finally { Cursor = Cursors.Default; }
                 }
             };
-            pnlCompForm.Controls.Add(btnLoadComputersHere, 1, 2);
+            cardComp.Controls.Add(btnLoadComputersHere);
 
-            splitComp.Panel2.Controls.Add(pnlCompForm);
+            // === ЛОГ (RichTextBox) ===
+            txtLog = new RichTextBox
+            {
+                Dock = DockStyle.Bottom,
+                Height = 180,
+                ReadOnly = true,
+                DetectUrls = false,
+                WordWrap = false,
+                ScrollBars = RichTextBoxScrollBars.Both,
+                BorderStyle = BorderStyle.None,
+                BackColor = Color.White
+            };
+            Controls.Add(txtLog);
 
-            // === ЛОГ ===
-            txtLog = new TextBox { Dock = DockStyle.Fill, Multiline = true, ScrollBars = ScrollBars.Both, ReadOnly = true, WordWrap = false };
-            mid.Controls.Add(txtLog, 0, 1);
-
-            // Значения по умолчанию
-            txtUpnSuffix.Text = AdUtils.GetDefaultUpnSuffix();
-
-            // Иконки и привязка к деревьям
+            // Иконки
             InitTreeIcons();
             tvUsers.ImageList = _icons;
             tvComputers.ImageList = _icons;
 
-            // При первом показе — построить деревья OU (лениво)
+            // Значения по умолчанию
+            txtUpnSuffix.Text = AdUtils.GetDefaultUpnSuffix();
+
+            // Стартовая загрузка
             Shown += (s, e) =>
             {
                 BuildOuTree(tvUsers, lblUsersDn, includeUsersCn: true, includeComputersCn: false);
                 BuildOuTree(tvComputers, lblComputersDn, includeUsersCn: false, includeComputersCn: true);
             };
+
+            // Автогенерация логина
+            txtGivenName.TextChanged += (s, e) => AutoFillSam();
+            txtSurname.TextChanged += (s, e) => AutoFillSam();
         }
 
+        // ------------------------- UI helpers -------------------------
+        private void ApplyTheme()
+        {
+            Font = new Font("Segoe UI", 10f);
+            ToolStripManager.Renderer = new GreenRenderer();
+            BackColor = Color.White;
+        }
+
+        private ToolStrip CreateToolbar()
+        {
+            var ts = new ToolStrip
+            {
+                GripStyle = ToolStripGripStyle.Hidden,
+                ImageScalingSize = new Size(20, 20),
+                BackColor = Color.FromArgb(246, 248, 250)
+            };
+            ts.Items.Add(new ToolStripButton("Обновить все", null, (s, e) =>
+            {
+                BuildOuTree(tvUsers, lblUsersDn, includeUsersCn: true, includeComputersCn: false);
+                BuildOuTree(tvComputers, lblComputersDn, includeUsersCn: false, includeComputersCn: true);
+            })
+            { DisplayStyle = ToolStripItemDisplayStyle.Text });
+
+            ts.Items.Add(new ToolStripSeparator());
+            ts.Items.Add(new ToolStripLabel("Функции:"));
+            ts.Items.Add(new ToolStripButton("Создать пользователя") { DisplayStyle = ToolStripItemDisplayStyle.Text });
+            ts.Items.Add(new ToolStripButton("Создать компьютер") { DisplayStyle = ToolStripItemDisplayStyle.Text });
+            return ts;
+        }
+
+        private Button MakeGreenBtn(string text)
+        {
+            var b = new Button
+            {
+                Text = text,
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Color.FromArgb(46, 196, 109),
+                ForeColor = Color.White,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Padding = new Padding(10, 6, 10, 6),
+                Margin = new Padding(6),
+                UseCompatibleTextRendering = true,
+                MinimumSize = new Size(180, 0)
+            };
+            b.FlatAppearance.BorderSize = 0;
+            return b;
+        }
+
+        private Button MakeGreyBtn(string text, int minWidth = 120)
+        {
+            var b = new Button
+            {
+                Text = text,
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Color.FromArgb(235, 240, 245),
+                ForeColor = Color.Black,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Padding = new Padding(10, 6, 10, 6),
+                Margin = new Padding(6, 0, 0, 0),
+                UseCompatibleTextRendering = true,
+                MinimumSize = new Size(minWidth, 0)
+            };
+            b.FlatAppearance.BorderSize = 0;
+            return b;
+        }
+
+        private FlowLayoutPanel MakeCard(string title)
+        {
+            var card = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Top,
+                AutoSize = true,
+                FlowDirection = FlowDirection.TopDown,
+                WrapContents = false,
+                Padding = new Padding(12),
+                Margin = new Padding(0, 0, 0, 12),
+                BackColor = Color.White
+            };
+            card.Paint += (s, e) =>
+            {
+                var r = new Rectangle(0, 0, card.Width - 1, card.Height - 1);
+                using var p = new Pen(Color.FromArgb(230, 234, 238));
+                e.Graphics.DrawRectangle(p, r);
+            };
+
+            var header = new Label
+            {
+                Text = title,
+                Font = new Font("Segoe UI Semibold", 12f),
+                AutoSize = true,
+                ForeColor = Color.FromArgb(33, 37, 41),
+                Margin = new Padding(0, 0, 0, 8)
+            };
+            card.Controls.Add(header);
+            return card;
+        }
+
+        private class GreenRenderer : ToolStripProfessionalRenderer
+        {
+            protected override void OnRenderToolStripBorder(ToolStripRenderEventArgs e) { }
+            protected override void OnRenderButtonBackground(ToolStripItemRenderEventArgs e)
+            {
+                var rect = new Rectangle(Point.Empty, e.Item.Size);
+                if (e.Item.Selected || (e.Item as ToolStripButton)?.Checked == true)
+                    using (var b = new SolidBrush(Color.FromArgb(228, 245, 236)))
+                        e.Graphics.FillRectangle(b, rect);
+            }
+        }
+
+        // ------------------------- ИКОНКИ -------------------------
         private void InitTreeIcons()
         {
-            _icons = new ImageList { ColorDepth = ColorDepth.Depth32Bit, ImageSize = new Size(16, 16) };
-            _icons.Images.Add("domain", SystemIcons.Shield.ToBitmap());
-            _icons.Images.Add("ou", SystemIcons.Application.ToBitmap());
-            _icons.Images.Add("container", SystemIcons.Asterisk.ToBitmap());
-            _icons.Images.Add("user", SystemIcons.Information.ToBitmap());
-            _icons.Images.Add("computer", SystemIcons.WinLogo.ToBitmap());
-            _icons.Images.Add("default", SystemIcons.Application.ToBitmap());
+            _icons = new ImageList
+            {
+                ColorDepth = ColorDepth.Depth32Bit,
+                ImageSize = new Size(16, 16)
+            };
+
+            // пытаемся загрузить из файлов проекта
+            Bitmap TryLoad(string fileName, Bitmap fallback)
+            {
+                try
+                {
+                    var p1 = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Resources", fileName);
+                    var p2 = Path.Combine(Environment.CurrentDirectory, "Resources", fileName);
+                    var path = File.Exists(p1) ? p1 : (File.Exists(p2) ? p2 : null);
+                    if (path != null)
+                    {
+                        using var tmp = (Bitmap)Image.FromFile(path);
+                        return new Bitmap(tmp); // копия, чтобы файл не держался открытым
+                    }
+                }
+                catch { }
+                return fallback;
+            }
+
+            var icoDomain = TryLoad("Domain16.png", SystemIcons.Shield.ToBitmap());
+            var icoFolder = TryLoad("FolderClosed16.png", SystemIcons.Application.ToBitmap());
+            var icoFolderOpen = TryLoad("FolderOpen16.png", SystemIcons.Application.ToBitmap());
+            var icoUser = TryLoad("User16.png", SystemIcons.Information.ToBitmap());
+            var icoComputer = TryLoad("Computer16.png", SystemIcons.WinLogo.ToBitmap());
+
+            _icons.Images.Add("domain", icoDomain);
+            _icons.Images.Add("ou", icoFolder);
+            _icons.Images.Add("ou_open", icoFolderOpen);
+            _icons.Images.Add("container", icoFolder);
+            _icons.Images.Add("container_open", icoFolderOpen);
+            _icons.Images.Add("user", icoUser);
+            _icons.Images.Add("computer", icoComputer);
         }
 
-        // ===== Создание пользователя =====
+        // динамическая смена папки (открыта/закрыта)
+        private void Tree_AfterExpandCollapse(object sender, TreeViewEventArgs e)
+        {
+            if (e.Node?.Tag is OuNodeTag tag)
+            {
+                switch (tag.Kind)
+                {
+                    case NodeKind.OrganizationalUnit:
+                        e.Node.ImageKey = (e.Action == TreeViewAction.Expand) ? "ou_open" : "ou";
+                        e.Node.SelectedImageKey = e.Node.ImageKey;
+                        break;
+                    case NodeKind.Container:
+                        e.Node.ImageKey = (e.Action == TreeViewAction.Expand) ? "container_open" : "container";
+                        e.Node.SelectedImageKey = e.Node.ImageKey;
+                        break;
+                }
+            }
+        }
+
+        // ------------------------- ЛОГИРОВАНИЕ (без мерцания) -------------------------
+        private void AppendLogLine(string text, bool ok)
+        {
+            if (txtLog.IsDisposed) return;
+
+            try
+            {
+                SendMessage(txtLog.Handle, WM_SETREDRAW, IntPtr.Zero, IntPtr.Zero); // freeze
+
+                var timestamp = $"[{DateTime.Now:T}] ";
+                txtLog.SelectionStart = txtLog.TextLength;
+                txtLog.SelectionLength = 0;
+
+                txtLog.SelectionColor = Color.DimGray;
+                txtLog.AppendText(timestamp);
+
+                txtLog.SelectionColor = ok ? Color.ForestGreen : Color.Firebrick;
+                txtLog.AppendText(ok ? "✅ " : "❌ ");
+
+                txtLog.SelectionColor = Color.Black;
+                txtLog.AppendText(text + Environment.NewLine);
+            }
+            finally
+            {
+                SendMessage(txtLog.Handle, WM_SETREDRAW, new IntPtr(1), IntPtr.Zero); // unfreeze
+                txtLog.Invalidate();
+                txtLog.SelectionStart = txtLog.TextLength;
+                txtLog.ScrollToCaret();
+            }
+        }
+        private void LogOk(string message) => AppendLogLine(message, ok: true);
+        private void LogErr(string message) => AppendLogLine("Ошибка: " + message, ok: false);
+
+        // ------------------------- AD-логика (как у тебя) -------------------------
         private void BtnCreateUser_Click(object sender, EventArgs e)
         {
-            txtLog.AppendText($"[{DateTime.Now:T}] Создание пользователя...\r\n");
+            AppendLogLine("Создание пользователя...", true);
             try
             {
                 var domain = AdUtils.SafeTrim(txtDomain.Text);
@@ -446,10 +697,9 @@ namespace AD
             catch (Exception ex) { LogErr(ex.Message); }
         }
 
-        // ===== Создание компьютера =====
         private void BtnCreateComputer_Click(object sender, EventArgs e)
         {
-            txtLog.AppendText($"[{DateTime.Now:T}] Создание компьютера...\r\n");
+            AppendLogLine("Создание компьютера...", true);
             try
             {
                 var domain = AdUtils.SafeTrim(txtDomain.Text);
@@ -486,7 +736,6 @@ namespace AD
             catch (Exception ex) { LogErr(ex.Message); }
         }
 
-        // ===== Ленивая загрузка дерева =====
         private async void BuildOuTree(TreeView tv, Label lblSelected, bool includeUsersCn, bool includeComputersCn)
         {
             _treeCts?.Cancel();
@@ -510,18 +759,15 @@ namespace AD
                     ImageKey = "domain",
                     SelectedImageKey = "domain"
                 };
+                rootNode.Nodes.Add(new TreeNode(DummyNodeText)); // стрелка
                 tv.Nodes.Add(rootNode);
-
-                // Добавляем «заглушку», чтобы появилась стрелка раскрытия
-                rootNode.Nodes.Add(new TreeNode(DummyNodeText));
                 tv.EndUpdate();
 
-                // Подгружаем только первый уровень
                 await LoadChildrenOneLevelAsync(rootNode, includeUsersCn, includeComputersCn, ct);
                 rootNode.Expand();
                 LogOk("Структура OU загружена (ленивая подгрузка).");
             }
-            catch (OperationCanceledException) { /* ignore */ }
+            catch (OperationCanceledException) { }
             catch (Exception ex)
             {
                 tv.EndUpdate();
@@ -546,15 +792,9 @@ namespace AD
 
                     await LoadChildrenOneLevelAsync(e.Node, includeUsers, includeComputers, ct);
                 }
-                catch (OperationCanceledException) { /* ignore */ }
-                catch (Exception ex)
-                {
-                    LogErr("Ошибка подгрузки узла: " + ex.Message);
-                }
-                finally
-                {
-                    Cursor = Cursors.Default;
-                }
+                catch (OperationCanceledException) { }
+                catch (Exception ex) { LogErr("Ошибка подгрузки узла: " + ex.Message); }
+                finally { Cursor = Cursors.Default; }
             }
         }
 
@@ -583,7 +823,7 @@ namespace AD
                         {
                             Tag = child,
                             ImageKey = "ou",
-                            SelectedImageKey = "ou"
+                            SelectedImageKey = "ou_open"
                         };
                     }
                     else
@@ -592,7 +832,7 @@ namespace AD
                         {
                             Tag = child,
                             ImageKey = "container",
-                            SelectedImageKey = "container"
+                            SelectedImageKey = "container_open"
                         };
                     }
 
@@ -611,7 +851,7 @@ namespace AD
                             {
                                 Tag = cnUsers,
                                 ImageKey = "container",
-                                SelectedImageKey = "container"
+                                SelectedImageKey = "container_open"
                             };
                             n.Nodes.Add(new TreeNode(DummyNodeText));
                             parentNode.Nodes.Add(n);
@@ -626,7 +866,7 @@ namespace AD
                             {
                                 Tag = cnComputers,
                                 ImageKey = "container",
-                                SelectedImageKey = "container"
+                                SelectedImageKey = "container_open"
                             };
                             n.Nodes.Add(new TreeNode(DummyNodeText));
                             parentNode.Nodes.Add(n);
@@ -680,36 +920,22 @@ namespace AD
         {
             try
             {
-                DirectoryEntry rootDse;
-                if (!string.IsNullOrWhiteSpace(domainFqdn))
-                    rootDse = new DirectoryEntry($"LDAP://{domainFqdn}/RootDSE");
-                else
-                    rootDse = new DirectoryEntry("LDAP://RootDSE");
+                DirectoryEntry rootDse = string.IsNullOrWhiteSpace(domainFqdn)
+                    ? new DirectoryEntry("LDAP://RootDSE")
+                    : new DirectoryEntry($"LDAP://{domainFqdn}/RootDSE");
 
                 return rootDse.Properties["defaultNamingContext"]?.Value as string;
             }
-            catch
-            {
-                return null;
-            }
+            catch { return null; }
         }
 
-        // ===== Автогенерация логина (ФИО → sAMAccountName) =====
         private void AutoFillSam(bool force = false)
         {
             var given = AdUtils.SafeTrim(txtGivenName.Text);
             var sur = AdUtils.SafeTrim(txtSurname.Text);
-            if (string.IsNullOrWhiteSpace(given) || string.IsNullOrWhiteSpace(sur))
-                return;
-
+            if (string.IsNullOrWhiteSpace(given) || string.IsNullOrWhiteSpace(sur)) return;
             if (!force && !string.IsNullOrWhiteSpace(AdUtils.SafeTrim(txtSam.Text))) return;
-
-            var sam = AdUtils.BuildBestGuessSam(given, sur);
-            txtSam.Text = sam;
+            txtSam.Text = AdUtils.BuildBestGuessSam(given, sur);
         }
-
-        // ===== Логирование =====
-        private void LogOk(string message) => txtLog.AppendText($"[{DateTime.Now:T}] ✅ {message}\r\n");
-        private void LogErr(string message) => txtLog.AppendText($"[{DateTime.Now:T}] ❌ Ошибка: {message}\r\n");
     }
 }
