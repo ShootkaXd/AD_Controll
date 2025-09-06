@@ -123,7 +123,7 @@ namespace AD
 
             var caption = new Label
             {
-                Text = "AD Manager",
+                Text = "Код Безопасности",
                 ForeColor = Color.White,
                 Font = new Font("Segoe UI Semibold", 16f, FontStyle.Bold),
                 AutoSize = true,
@@ -169,12 +169,7 @@ namespace AD
             };
             domRow.Controls.Add(btnApplyDomain, 1, 0);
 
-            // === Тулбар ===
-            var toolbar = CreateToolbar();
-            toolbar.Dock = DockStyle.Top;
-            Controls.Add(toolbar);
-            toolbar.BringToFront();
-            top.BringToFront();
+            // === Тулбар убран ===
 
             // === Статус-бар ===
             status = new StatusStrip();
@@ -237,14 +232,13 @@ namespace AD
                 else if (e.Node?.Tag is AccountNodeTag tagAcc) lblUsersDn.Text = $"Выбрано: {tagAcc.Kind}: {tagAcc.DistinguishedName}";
                 else lblUsersDn.Text = "Выбрано: —";
             };
-            // смена иконки открытой/закрытой папки
             tvUsers.AfterExpand += Tree_AfterExpandCollapse;
             tvUsers.AfterCollapse += Tree_AfterExpandCollapse;
 
             leftUsersWrap.Controls.Add(tvUsers, 0, 1);
 
-            lblUsersDn = new Label { Text = "Выбрано: —", ForeColor = Color.WhiteSmoke, Dock = DockStyle.Fill, Padding = new Padding(4, 6, 4, 6) };
-            leftUsersWrap.Controls.Add(lblUsersDn, 0, 2);
+            var usersSelBar = MakeSelectionBar(out lblUsersDn);
+            leftUsersWrap.Controls.Add(usersSelBar, 0, 2);
 
             // Левая вкладка — компьютеры
             var leftCompsWrap = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, Padding = new Padding(4) };
@@ -277,8 +271,8 @@ namespace AD
 
             leftCompsWrap.Controls.Add(tvComputers, 0, 1);
 
-            lblComputersDn = new Label { Text = "Выбрано: —", ForeColor = Color.WhiteSmoke, Dock = DockStyle.Fill, Padding = new Padding(4, 6, 4, 6) };
-            leftCompsWrap.Controls.Add(lblComputersDn, 0, 2);
+            var compsSelBar = MakeSelectionBar(out lblComputersDn);
+            leftCompsWrap.Controls.Add(compsSelBar, 0, 2);
 
             // ----- Правая панель: плоские светлые вкладки -----
             var tabs = new FlatTabControl
@@ -396,11 +390,11 @@ namespace AD
             };
             cardComp.Controls.Add(btnLoadComputersHere);
 
-            // === ЛОГ (RichTextBox) ===
+            // === ЛОГ (RichTextBox) — уменьшенная высота ===
             txtLog = new RichTextBox
             {
                 Dock = DockStyle.Bottom,
-                Height = 180,
+                Height = 120,
                 ReadOnly = true,
                 DetectUrls = false,
                 WordWrap = false,
@@ -436,28 +430,6 @@ namespace AD
             Font = new Font("Segoe UI", 10f);
             ToolStripManager.Renderer = new GreenRenderer();
             BackColor = Color.White;
-        }
-
-        private ToolStrip CreateToolbar()
-        {
-            var ts = new ToolStrip
-            {
-                GripStyle = ToolStripGripStyle.Hidden,
-                ImageScalingSize = new Size(20, 20),
-                BackColor = Color.FromArgb(246, 248, 250)
-            };
-            ts.Items.Add(new ToolStripButton("Обновить все", null, (s, e) =>
-            {
-                BuildOuTree(tvUsers, lblUsersDn, includeUsersCn: true, includeComputersCn: false);
-                BuildOuTree(tvComputers, lblComputersDn, includeUsersCn: false, includeComputersCn: true);
-            })
-            { DisplayStyle = ToolStripItemDisplayStyle.Text });
-
-            ts.Items.Add(new ToolStripSeparator());
-            ts.Items.Add(new ToolStripLabel("Функции:"));
-            ts.Items.Add(new ToolStripButton("Создать пользователя") { DisplayStyle = ToolStripItemDisplayStyle.Text });
-            ts.Items.Add(new ToolStripButton("Создать компьютер") { DisplayStyle = ToolStripItemDisplayStyle.Text });
-            return ts;
         }
 
         private Button MakeGreenBtn(string text)
@@ -529,6 +501,36 @@ namespace AD
             return card;
         }
 
+        // Панель «Выбрано: …» с контрастом и разделителем сверху
+        private Panel MakeSelectionBar(out Label label)
+        {
+            var bar = new Panel
+            {
+                Dock = DockStyle.Fill,
+                Height = 32,
+                BackColor = Color.FromArgb(51, 58, 68),
+                Padding = new Padding(10, 6, 10, 6),
+                Margin = new Padding(0)
+            };
+            bar.Paint += (s, e) =>
+            {
+                using var p = new Pen(Color.FromArgb(62, 70, 82));
+                e.Graphics.DrawLine(p, 0, 0, bar.Width, 0);
+            };
+
+            label = new Label
+            {
+                Dock = DockStyle.Fill,
+                AutoSize = false,
+                ForeColor = Color.WhiteSmoke,
+                Font = new Font("Segoe UI", 9.5f),
+                TextAlign = ContentAlignment.MiddleLeft,
+                Text = "Выбрано: —"
+            };
+            bar.Controls.Add(label);
+            return bar;
+        }
+
         private class GreenRenderer : ToolStripProfessionalRenderer
         {
             protected override void OnRenderToolStripBorder(ToolStripRenderEventArgs e) { }
@@ -550,37 +552,14 @@ namespace AD
                 ImageSize = new Size(16, 16)
             };
 
-            // пытаемся загрузить из файлов проекта
-            Bitmap TryLoad(string fileName, Bitmap fallback)
-            {
-                try
-                {
-                    var p1 = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Resources", fileName);
-                    var p2 = Path.Combine(Environment.CurrentDirectory, "Resources", fileName);
-                    var path = File.Exists(p1) ? p1 : (File.Exists(p2) ? p2 : null);
-                    if (path != null)
-                    {
-                        using var tmp = (Bitmap)Image.FromFile(path);
-                        return new Bitmap(tmp); // копия, чтобы файл не держался открытым
-                    }
-                }
-                catch { }
-                return fallback;
-            }
-
-            var icoDomain = TryLoad("Domain16.png", SystemIcons.Shield.ToBitmap());
-            var icoFolder = TryLoad("FolderClosed16.png", SystemIcons.Application.ToBitmap());
-            var icoFolderOpen = TryLoad("FolderOpen16.png", SystemIcons.Application.ToBitmap());
-            var icoUser = TryLoad("User16.png", SystemIcons.Information.ToBitmap());
-            var icoComputer = TryLoad("Computer16.png", SystemIcons.WinLogo.ToBitmap());
-
-            _icons.Images.Add("domain", icoDomain);
-            _icons.Images.Add("ou", icoFolder);
-            _icons.Images.Add("ou_open", icoFolderOpen);
-            _icons.Images.Add("container", icoFolder);
-            _icons.Images.Add("container_open", icoFolderOpen);
-            _icons.Images.Add("user", icoUser);
-            _icons.Images.Add("computer", icoComputer);
+            // Берём картинки из Properties.Resources (вшитые в сборку)
+            _icons.Images.Add("domain", new Bitmap(Properties.Resources.Domain16));
+            _icons.Images.Add("ou", new Bitmap(Properties.Resources.FolderClosed16));
+            _icons.Images.Add("ou_open", new Bitmap(Properties.Resources.FolderOpen16));
+            _icons.Images.Add("container", new Bitmap(Properties.Resources.FolderClosed16));
+            _icons.Images.Add("container_open", new Bitmap(Properties.Resources.FolderOpen16));
+            _icons.Images.Add("user", new Bitmap(Properties.Resources.User16));
+            _icons.Images.Add("computer", new Bitmap(Properties.Resources.Computer16));
         }
 
         // динамическая смена папки (открыта/закрыта)
@@ -635,7 +614,7 @@ namespace AD
         private void LogOk(string message) => AppendLogLine(message, ok: true);
         private void LogErr(string message) => AppendLogLine("Ошибка: " + message, ok: false);
 
-        // ------------------------- AD-логика (как у тебя) -------------------------
+        // ------------------------- AD-логика -------------------------
         private void BtnCreateUser_Click(object sender, EventArgs e)
         {
             AppendLogLine("Создание пользователя...", true);

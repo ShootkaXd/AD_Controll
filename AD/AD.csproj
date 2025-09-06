@@ -2,15 +2,21 @@
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net8.0-windows</TargetFramework>
+    <TargetFramework>net8.0-windows8.0</TargetFramework>
     <Nullable>enable</Nullable>
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
-	<ApplicationIcon>Resources\AppIcon.ico</ApplicationIcon>	  
+	<ApplicationIcon>Resources\AppIcon.ico</ApplicationIcon>
+	<SupportedOSPlatformVersion>8.0</SupportedOSPlatformVersion>	  
   </PropertyGroup>
 
   <ItemGroup>
     <None Remove="Resources\AppIcon.ico" />
+    <None Remove="Resources\Computer16.png" />
+    <None Remove="Resources\Domain16.png" />
+    <None Remove="Resources\FolderClosed16.png" />
+    <None Remove="Resources\FolderOpen16.png" />
+    <None Remove="Resources\User16.png" />
   </ItemGroup>
 
   <ItemGroup>
@@ -20,6 +26,36 @@
 
   <ItemGroup>
     <Resource Include="Resources\AppIcon.ico" />
+    <Resource Include="Resources\Computer16.png">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Resource>
+    <Resource Include="Resources\Domain16.png">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Resource>
+    <Resource Include="Resources\FolderClosed16.png">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Resource>
+    <Resource Include="Resources\FolderOpen16.png">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Resource>
+    <Resource Include="Resources\User16.png">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Resource>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Update="Properties\Resources.Designer.cs">
+      <DesignTime>True</DesignTime>
+      <AutoGen>True</AutoGen>
+      <DependentUpon>Resources.resx</DependentUpon>
+    </Compile>
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Update="Properties\Resources.resx">
+      <Generator>ResXFileCodeGenerator</Generator>
+      <LastGenOutput>Resources.Designer.cs</LastGenOutput>
+    </EmbeddedResource>
   </ItemGroup>
 
 </Project>
